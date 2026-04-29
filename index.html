@@ -549,68 +549,57 @@ const aktivity = [
 ];
 
 // ============================================================
-//  NASTAV SVOU URL ZDE po nasazení Apps Scriptu:
+//  VOLITELNÉ: až nastavíš Apps Script, vlož URL sem.
+//  Bez ní funguje vše lokálně v prohlížeči každého uživatele.
 // ============================================================
-const SCRIPT_URL = 'VLOZ_ZDE_SVOU_APPS_SCRIPT_URL';
+const SCRIPT_URL = '';
 // ============================================================
 
-// Lokální cache hlasů a "kdo jsem hlasoval" (jen pro tento prohlížeč)
-let sharedVotes = {};   // { activityId: count } — z Google Sheets
-let myVoted = [];       // IDs aktivit, kde TENTO uživatel hlasoval (localStorage)
-let sharedComments = []; // pole komentářů z Google Sheets
+let sharedVotes = {};
+let sharedComments = [];
+let myVoted = [];
+let currentFilter = 'vse';
+const USE_BACKEND = SCRIPT_URL && SCRIPT_URL.length > 10;
 
-function getMyVoted() { try { return JSON.parse(localStorage.getItem('prahaVoted') || '[]'); } catch { return []; } }
-function saveMyVoted(v) { localStorage.setItem('prahaVoted', JSON.stringify(v)); }
+function ls(key, fallback) { try { return JSON.parse(localStorage.getItem(key) || fallback); } catch { return JSON.parse(fallback); } }
+function lsSave(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
 function catLabel(cat) {
   return { historie: '🏰 Historie', priroda: '🌿 Příroda', kultura: '🎭 Kultura', zabava: '🎡 Zábava', jidlo: '🍽️ Jídlo', rybi: '🎣 Rybaření & klid' }[cat] || cat;
 }
 
-// ── API volání ──────────────────────────────────────────────
-
-async function apiCall(params) {
-  const url = SCRIPT_URL + '?' + new URLSearchParams(params);
-  const res = await fetch(url);
-  return res.json();
-}
-
-async function apiPost(body) {
-  const res = await fetch(SCRIPT_URL, {
-    method: 'POST',
-    body: JSON.stringify(body)
-  });
-  return res.json();
-}
-
-// ── Načtení dat ze Sheets ────────────────────────────────────
+// ── Načtení dat ──────────────────────────────────────────────
 
 async function loadAll() {
-  setLoading(true);
-  try {
-    const data = await apiCall({ action: 'getAll' });
-    sharedVotes = data.votes || {};
-    sharedComments = data.comments || [];
-    myVoted = getMyVoted();
-    renderGrid(currentFilter);
-    renderResults();
-    renderComments();
-    updateHeroStats();
-  } catch (e) {
-    console.error('Chyba při načítání dat:', e);
-    showError('Nepodařilo se načíst data. Zkontroluj SCRIPT_URL v kódu.');
-  } finally {
-    setLoading(false);
+  myVoted = ls('prahaVoted', '[]');
+
+  if (USE_BACKEND) {
+    try {
+      const res = await fetch(SCRIPT_URL + '?action=getAll');
+      const data = await res.json();
+      sharedVotes = data.votes || {};
+      sharedComments = data.comments || [];
+    } catch (e) {
+      console.warn('Backend nedostupný, používám localStorage.');
+      sharedVotes = ls('prahaVotes', '{}');
+      sharedComments = ls('prahaComments', '[]');
+    }
+  } else {
+    sharedVotes = ls('prahaVotes', '{}');
+    sharedComments = ls('prahaComments', '[]');
   }
+
+  renderGrid(currentFilter);
+  renderResults();
+  renderComments();
+  updateHeroStats();
 }
 
 // ── Hlasování ────────────────────────────────────────────────
 
 async function vote(id) {
-  myVoted = getMyVoted();
   const alreadyVoted = myVoted.includes(id);
-  const action = alreadyVoted ? 'removeVote' : 'addVote';
 
-  // Optimistic UI update
   if (alreadyVoted) {
     sharedVotes[id] = Math.max(0, (sharedVotes[id] || 0) - 1);
     myVoted = myVoted.filter(v => v !== id);
@@ -618,16 +607,18 @@ async function vote(id) {
     sharedVotes[id] = (sharedVotes[id] || 0) + 1;
     myVoted.push(id);
   }
-  saveMyVoted(myVoted);
+
+  lsSave('prahaVoted', myVoted);
+  if (!USE_BACKEND) lsSave('prahaVotes', sharedVotes);
+
   updateVoteButton(id);
   renderResults();
   updateHeroStats();
 
-  // Odeslat na server
-  try {
-    await apiPost({ action, id });
-  } catch (e) {
-    console.error('Chyba při hlasování:', e);
+  if (USE_BACKEND) {
+    try {
+      await fetch(SCRIPT_URL, { method: 'POST', body: JSON.stringify({ action: alreadyVoted ? 'removeVote' : 'addVote', id }) });
+    } catch (e) { console.warn('Hlas se nepodařilo uložit na server.'); }
   }
 }
 
@@ -635,10 +626,7 @@ function updateVoteButton(id) {
   const hasVoted = myVoted.includes(id);
   const btn = document.getElementById(`vote-btn-${id}`);
   const count = document.getElementById(`vote-count-${id}`);
-  if (btn) {
-    btn.className = `vote-btn ${hasVoted ? 'voted' : ''}`;
-    btn.innerHTML = `${hasVoted ? '✓' : '♥'} ${hasVoted ? 'Hlasováno' : 'Chci tam!'}`;
-  }
+  if (btn) { btn.className = `vote-btn ${hasVoted ? 'voted' : ''}`; btn.innerHTML = `${hasVoted ? '✓' : '♥'} ${hasVoted ? 'Hlasováno' : 'Chci tam!'}`; }
   if (count) count.textContent = sharedVotes[id] || 0;
 }
 
@@ -647,41 +635,36 @@ function updateVoteButton(id) {
 async function submitComment() {
   const name = document.getElementById('c-name').value.trim();
   const text = document.getElementById('c-text').value.trim();
-  const tag = document.getElementById('c-tag').value;
+  const tag  = document.getElementById('c-tag').value;
   if (!name || !text) { alert('Vyplň prosím jméno i komentář.'); return; }
 
   const btn = document.querySelector('.submit-btn');
-  btn.disabled = true;
-  btn.textContent = 'Odesílám…';
+  btn.disabled = true; btn.textContent = 'Odesílám…';
 
   const newComment = { name, text, tag, date: new Date().toLocaleDateString('cs-CZ') };
+  sharedComments.push(newComment);
+  if (!USE_BACKEND) lsSave('prahaComments', sharedComments);
 
-  try {
-    await apiPost({ action: 'addComment', comment: newComment });
-    sharedComments.push(newComment);
-    document.getElementById('c-name').value = '';
-    document.getElementById('c-text').value = '';
-    document.getElementById('c-tag').value = '';
-    renderComments();
-    updateHeroStats();
-  } catch (e) {
-    alert('Nepodařilo se odeslat komentář. Zkus to znovu.');
-    console.error(e);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Přidat komentář →';
+  document.getElementById('c-name').value = '';
+  document.getElementById('c-text').value = '';
+  document.getElementById('c-tag').value = '';
+  renderComments();
+  updateHeroStats();
+  btn.disabled = false; btn.textContent = 'Přidat komentář →';
+
+  if (USE_BACKEND) {
+    try {
+      await fetch(SCRIPT_URL, { method: 'POST', body: JSON.stringify({ action: 'addComment', comment: newComment }) });
+    } catch (e) { console.warn('Komentář se nepodařilo uložit na server.'); }
   }
 }
 
-// ── Render ────────────────────────────────────────────────────
-
-let currentFilter = 'vse';
+// ── Render ───────────────────────────────────────────────────
 
 function renderGrid(filterCat) {
   currentFilter = filterCat;
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  myVoted = getMyVoted();
   const filtered = filterCat === 'vse' ? aktivity : aktivity.filter(a => a.cat === filterCat);
   filtered.forEach(a => {
     const v = sharedVotes[a.id] || 0;
@@ -713,24 +696,15 @@ function renderGrid(filterCat) {
           <div class="vote-label">hlasů</div>
         </div>
         <a class="web-link" href="${a.web}" target="_blank" rel="noopener">🔗 Web →</a>
-      </div>
-    `;
+      </div>`;
     grid.appendChild(card);
   });
 }
 
 function renderResults() {
   const list = document.getElementById('results-list');
-  const sorted = aktivity
-    .map(a => ({ ...a, votes: sharedVotes[a.id] || 0 }))
-    .filter(a => a.votes > 0)
-    .sort((a, b) => b.votes - a.votes)
-    .slice(0, 10);
-
-  if (sorted.length === 0) {
-    list.innerHTML = '<div class="no-votes">Zatím nikdo nehlasoval. Buďte první! 👆</div>';
-    return;
-  }
+  const sorted = aktivity.map(a => ({ ...a, votes: sharedVotes[a.id] || 0 })).filter(a => a.votes > 0).sort((a, b) => b.votes - a.votes).slice(0, 10);
+  if (sorted.length === 0) { list.innerHTML = '<div class="no-votes">Zatím nikdo nehlasoval. Buďte první! 👆</div>'; return; }
   const max = sorted[0].votes;
   list.innerHTML = sorted.map((a, i) => `
     <div class="result-bar">
@@ -738,16 +712,12 @@ function renderResults() {
       <div class="result-name">${a.emoji} ${a.nazev}</div>
       <div class="bar-wrap"><div class="bar-fill" style="width:${(a.votes/max*100).toFixed(0)}%"></div></div>
       <div class="result-votes">${a.votes}</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 function renderComments() {
   const list = document.getElementById('comment-list');
-  if (sharedComments.length === 0) {
-    list.innerHTML = '<div class="no-comments" id="no-comments-msg">Zatím žádné komentáře. Přidej první! 👇</div>';
-    return;
-  }
+  if (sharedComments.length === 0) { list.innerHTML = '<div class="no-comments">Zatím žádné komentáře. Přidej první! 👇</div>'; return; }
   list.innerHTML = [...sharedComments].reverse().map(c => `
     <div class="comment">
       <div class="comment-header">
@@ -758,13 +728,11 @@ function renderComments() {
         </div>
       </div>
       <div class="comment-text">${String(c.text).replace(/</g,'&lt;')}</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 function updateHeroStats() {
-  const total = Object.values(sharedVotes).reduce((s, v) => s + (v || 0), 0);
-  document.getElementById('total-votes-hero').textContent = total;
+  document.getElementById('total-votes-hero').textContent = Object.values(sharedVotes).reduce((s, v) => s + (v || 0), 0);
   document.getElementById('total-comments-hero').textContent = sharedComments.length;
 }
 
@@ -774,17 +742,7 @@ function filter(cat, btn) {
   renderGrid(cat);
 }
 
-function setLoading(on) {
-  const grid = document.getElementById('grid');
-  if (on) grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:60px;color:#9ca3af;font-size:1rem;">⏳ Načítám data…</div>';
-}
-
-function showError(msg) {
-  const grid = document.getElementById('grid');
-  grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:#c0392b;font-size:0.9rem;">⚠️ ${msg}</div>`;
-}
-
-// ── Start ─────────────────────────────────────────────────────
+// ── Start ────────────────────────────────────────────────────
 loadAll();
 </script>
 </body>
